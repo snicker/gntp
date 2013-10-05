@@ -97,7 +97,8 @@ class _GNTPBase(object):
 			raise errors.ParseError('ERROR_PARSING_INFO_LINE')
 
 		info = match.groupdict()
-		info['encryptionAlgorithmID'] = info['encryptionAlgorithmID'].replace(":" + info['ivValue'],"") #snicker: hacky way of fixing the regex errors
+		if info['encryptionAlgorithmID'].find(':') > -1:
+			info['encryptionAlgorithmID'] = info['encryptionAlgorithmID'].replace(":" + info.get('ivValue',''),"") #snicker: hacky way of fixing the regex errors
 		if info['encryptionAlgorithmID'] == 'NONE':
 			info['encryptionAlgorithmID'] = None
 		
