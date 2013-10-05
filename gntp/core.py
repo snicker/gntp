@@ -8,6 +8,8 @@ import time
 import gntp.shim
 import gntp.errors as errors
 
+from Crypto.Cipher import AES, DES, DES3
+
 __all__ = [
 	'GNTPRegister',
 	'GNTPNotice',
@@ -65,6 +67,17 @@ class _GNTPBase(object):
 			'messagetype': messagetype,
 			'encryptionAlgorithmID': encryption
 		}
+		self.hash_algo = {
+			'MD5': hashlib.md5,
+			'SHA1': hashlib.sha1,
+			'SHA256': hashlib.sha256,
+			'SHA512': hashlib.sha512,
+		}	
+		self.enc_algo = {
+			'AES': { 'cipher': AES, 'key_size': 24, },
+			'DES': { 'cipher': DES, 'key_size': 8, },
+			'DES3': { 'cipher': DES3, 'key_size': 24, },
+		}
 		self.headers = {}
 		self.resources = {}
 
@@ -84,9 +97,15 @@ class _GNTPBase(object):
 			raise errors.ParseError('ERROR_PARSING_INFO_LINE')
 
 		info = match.groupdict()
+		info['encryptionAlgorithmID'] = info['encryptionAlgorithmID'].replace(":" + info['ivValue'],"") #snicker: hacky way of fixing the regex errors
 		if info['encryptionAlgorithmID'] == 'NONE':
 			info['encryptionAlgorithmID'] = None
-
+		
+		if info['encryptionAlgorithmID'] != None:
+			info['ivValueUnencoded'] = info['ivValue'].decode("hex")
+		
+		pprint(info)
+		
 		return info
 
 	def set_password(self, password, encryptAlgo='MD5'):
@@ -95,13 +114,6 @@ class _GNTPBase(object):
 		:param string password: Null to clear password
 		:param string encryptAlgo: Supports MD5, SHA1, SHA256, SHA512
 		"""
-		hash_algo = {
-			'MD5': hashlib.md5,
-			'SHA1': hashlib.sha1,
-			'SHA256': hashlib.sha256,
-			'SHA512': hashlib.sha512,
-		}
-
 		if not password:
 			self.info['encryptionAlgorithmID'] = None
 			self.info['keyHashAlgorithm'] = None
@@ -110,10 +122,10 @@ class _GNTPBase(object):
 		self.password = gntp.shim.b(password)
 		self.encryptAlgo = encryptAlgo.upper()
 
-		if not self.encryptAlgo in hash_algo:
+		if not self.encryptAlgo in self.hash_algo:
 			raise errors.UnsupportedError('INVALID HASH "%s"' % self.encryptAlgo)
 
-		hashfunction = hash_algo.get(self.encryptAlgo)
+		hashfunction = self.hash_algo.get(self.encryptAlgo)
 
 		password = password.encode('utf8')
 		seed = time.ctime().encode('utf8')
@@ -164,19 +176,12 @@ class _GNTPBase(object):
 
 		keyHashAlgorithmID = self.info.get('keyHashAlgorithmID','MD5')
 
-		hash_algo = {
-			'MD5': hashlib.md5,
-			'SHA1': hashlib.sha1,
-			'SHA256': hashlib.sha256,
-			'SHA512': hashlib.sha512,
-		}
-
 		password = self.password.encode('utf8')
 		saltHash = self._decode_hex(self.info['salt'])
 
 		keyBasis = password + saltHash
-		key = hash_algo[keyHashAlgorithmID](keyBasis).digest()
-		keyHash = hash_algo[keyHashAlgorithmID](key).hexdigest()
+		self.key = self.hash_algo[keyHashAlgorithmID](keyBasis).digest()
+		keyHash = self.hash_algo[keyHashAlgorithmID](self.key).hexdigest()
 
 		if not keyHash.upper() == self.info['keyHash'].upper():
 			raise errors.AuthError('Invalid Hash')
@@ -213,6 +218,16 @@ class _GNTPBase(object):
 			)
 
 		return info
+	
+	def _decrypt(self, data):
+		if self.info.get('encryptionAlgorithmID'):
+			algo = self.enc_algo[self.info.get('encryptionAlgorithmID')]
+			cipher = algo['cipher'].new(self.key[:algo['key_size']],2,self.info.get('ivValueUnencoded'))
+			data = cipher.decrypt(data)
+		return data
+	
+	def _decrypt_header(self, headerdata):
+		return self._decrypt(headerdata.split('\r\n',1)[1])
 
 	def _parse_dict(self, data):
 		"""Helper function to parse blocks of GNTP headers into a dictionary
@@ -250,10 +265,10 @@ class _GNTPBase(object):
 		:param string data:
 		"""
 		self.password = password
-		self.raw = gntp.shim.u(data)
+		self.raw = gntp.shim.b(data)
 		parts = self.raw.split('\r\n\r\n')
 		self.info = self._parse_info(self.raw)
-		self.headers = self._parse_dict(parts[0])
+		self.headers = self._parse_dict(self._decrypt_header(parts[0]))
 
 	def encode(self):
 		"""Encode a generic GNTP Message
@@ -320,11 +335,11 @@ class GNTPRegister(_GNTPBase):
 
 		:param string data: Message to decode
 		"""
-		self.raw = gntp.shim.u(data)
+		self.raw = gntp.shim.b(data)
 		parts = self.raw.split('\r\n\r\n')
 		self.info = self._parse_info(self.raw)
 		self._validate_password(password)
-		self.headers = self._parse_dict(parts[0])
+		self.headers = self._parse_dict(self._decrypt_header(parts[0]))
 
 		for i, part in enumerate(parts):
 			if i == 0:
@@ -332,10 +347,14 @@ class GNTPRegister(_GNTPBase):
 			if part.strip() == '':
 				continue
 			notice = self._parse_dict(part)
+			if self.info.get('encryptionAlgorithmID'):
+				if not notice.get('Identifier', False):
+					part = self._decrypt(part)
+					notice = self._parse_dict(part)
 			if notice.get('Notification-Name', False):
 				self.notifications.append(notice)
 			elif notice.get('Identifier', False):
-				notice['Data'] = self._decode_binary(part, notice)
+				notice['Data'] = self._decrypt(self._decode_binary(part, notice))
 				#open('register.png','wblol').write(notice['Data'])
 				self.resources[notice.get('Identifier')] = notice
 
@@ -420,20 +439,24 @@ class GNTPNotice(_GNTPBase):
 
 		:param string data: Message to decode.
 		"""
-		self.raw = gntp.shim.u(data)
+		self.raw = gntp.shim.b(data)
 		parts = self.raw.split('\r\n\r\n')
 		self.info = self._parse_info(self.raw)
 		self._validate_password(password)
-		self.headers = self._parse_dict(parts[0])
-
+		self.headers = self._parse_dict(self._decrypt_header(parts[0]))
+		
 		for i, part in enumerate(parts):
 			if i == 0:
 				continue  # Skip Header
 			if part.strip() == '':
 				continue
 			notice = self._parse_dict(part)
+			if self.info.get('encryptionAlgorithmID'):
+				if not notice.get('Identifier', False):
+					part = self._decrypt(part)
+					notice = self._parse_dict(part)
 			if notice.get('Identifier', False):
-				notice['Data'] = self._decode_binary(part, notice)
+				notice['Data'] = self._decrypt(self._decode_binary(part, notice))
 				#open('notice.png','wblol').write(notice['Data'])
 				self.resources[notice.get('Identifier')] = notice
 
@@ -501,7 +524,7 @@ def parse_gntp(data, password=None):
 	:param string data: Message to be parsed
 	:param string password: Optional password to be used to verify the message
 	"""
-	data = gntp.shim.u(data)
+	data = gntp.shim.b(data)
 	match = GNTP_INFO_LINE_SHORT.match(data)
 	if not match:
 		raise errors.ParseError('INVALID_GNTP_INFO')

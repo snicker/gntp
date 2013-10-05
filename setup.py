@@ -38,5 +38,8 @@ setup(
 		'Programming Language :: Python :: 3.3',
 		'Programming Language :: Python :: Implementation :: PyPy',
 	],
+	install_requires=[
+		'pycrypto',
+	],
 	**kwargs
 )
