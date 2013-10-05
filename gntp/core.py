@@ -103,9 +103,7 @@ class _GNTPBase(object):
 		
 		if info['encryptionAlgorithmID'] != None:
 			info['ivValueUnencoded'] = info['ivValue'].decode("hex")
-		
-		pprint(info)
-		
+				
 		return info
 
 	def set_password(self, password, encryptAlgo='MD5'):
