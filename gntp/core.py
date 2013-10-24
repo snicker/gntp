@@ -338,7 +338,12 @@ class GNTPRegister(_GNTPBase):
 		parts = self.raw.split('\r\n\r\n')
 		self.info = self._parse_info(self.raw)
 		self._validate_password(password)
-		self.headers = self._parse_dict(self._decrypt_header(parts[0]))
+		if self.info.get('encryptionAlgorithmID'): #snicker7 20131023 seems that if the header is encrypted, the splitting doesn't happen, and notification registration gets fubar'd
+			headerparts = self._decrypt_header(parts[0]).split('\r\n\r\n')
+			del parts[0]
+			while len(headerparts) > 0:
+				parts.insert(0,headerparts.pop())
+		self.headers = self._parse_dict(parts[0])
 
 		for i, part in enumerate(parts):
 			if i == 0:
@@ -347,7 +352,7 @@ class GNTPRegister(_GNTPBase):
 				continue
 			notice = self._parse_dict(part)
 			if self.info.get('encryptionAlgorithmID'):
-				if not notice.get('Identifier', False):
+				if not GNTP_HEADER.match(part):
 					part = self._decrypt(part)
 					notice = self._parse_dict(part)
 			if notice.get('Notification-Name', False):
